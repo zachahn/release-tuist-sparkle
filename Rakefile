@@ -2,16 +2,23 @@
 # Copy this file to your project's root. Requires Ruby 2.6+, Rake, REXML,
 # Tuist, Xcode command-line tools, and an authenticated GitHub CLI (gh).
 #
-# Configure with environment variables or a project-local release.json:
-# {
-#   "SCHEME": "MyApp",
-#   "TEAM_ID": "YOUR_TEAM_ID",
-#   "NOTARY_PROFILE": "my-notary-profile",
-#   "SPARKLE_ACCOUNT": "com.example.MyApp"
-# }
-# Environment variables take precedence. release:setup can add /release.json to .gitignore.
-# Credentials and the Sparkle private key stay in Keychain.
-# APPLE_ID is prompted for only when creating new notarization credentials.
+# Usage:
+#
+# - Run `rake release:setup` to create release.json and configure notarization
+# - Run `rake release:bump VERSION=1.1` to bump the marketing version
+# - Run `rake release:meta:diff` to compare this Rakefile with the upstream main branch
+# - Run `rake release:meta:upgrade` to pull the latest version of this Rakefile
+# - Run `rake release` to:
+#   - Validate the tools, signing keys, credentials, and repository state
+#   - Build, sign, notarize, and package the app
+#   - Generate a signed Sparkle appcast and publish a GitHub release
+# - Run `rake -T` to list all tasks
+#
+# Required settings (in release.json or as environment variables):
+# SCHEME          Xcode scheme to archive.
+# TEAM_ID         Apple Developer team ID for the signed export.
+# NOTARY_PROFILE  Saved notarytool Keychain profile name.
+# SPARKLE_ACCOUNT Sparkle EdDSA signing key account.
 #
 # Optional settings:
 # WORKSPACE       Path relative to this file; otherwise the sole *.xcworkspace.
@@ -23,25 +30,6 @@
 # SPARKLE_BIN_DIR Tuist/.build/artifacts/sparkle/Sparkle/bin (default).
 # RELEASE_NOTES   Markdown file relative to this file; otherwise generic notes.
 #
-# rake release:setup (create or complete release.json and configure notarization)
-# rake release:bump VERSION=1.1 (requires gh access to check published build numbers)
-# rake release:meta:diff (compare this Rakefile with the upstream main branch)
-# rake release:meta:upgrade (replace this Rakefile with the upstream main branch)
-# rake release
-# rake -T
-#
-# Stages can also run independently: release:run:preflight, release:run:archive,
-# release:run:export, release:run:zip, release:run:notarize,
-# release:run:appcast, release:run:github.
-# This workflow builds a universal macOS app with automatic Developer ID signing,
-# notarizes a ZIP, and publishes a regular GitHub release marked latest.
-# The app's SUFeedURL must be:
-# https://github.com/<owner>/<repo>/releases/latest/download/appcast.xml
-# SUPublicEDKey must match the Sparkle key stored under SPARKLE_ACCOUNT.
-# Commit and push source changes and the v<marketing-version> tag before publishing.
-# This pipeline does not commit or push automatically.
-# release:bump supports literal string MARKETING_VERSION and numeric string
-# CURRENT_PROJECT_VERSION entries in the Tuist manifest; all matches are updated.
 
 require "shellwords"
 require "fileutils"
