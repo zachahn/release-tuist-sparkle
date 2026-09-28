@@ -9,9 +9,9 @@
 #   "NOTARY_PROFILE": "my-notary-profile",
 #   "SPARKLE_ACCOUNT": "com.example.MyApp"
 # }
-# Environment variables take precedence. Add release.json to your .gitignore.
+# Environment variables take precedence. release:setup can add /release.json to .gitignore.
 # Credentials and the Sparkle private key stay in Keychain.
-# APPLE_ID is needed only when creating new notarization credentials.
+# APPLE_ID is prompted for only when creating new notarization credentials.
 #
 # Optional settings:
 # WORKSPACE       Path relative to this file; otherwise the sole *.xcworkspace.
@@ -23,7 +23,7 @@
 # SPARKLE_BIN_DIR Tuist/.build/artifacts/sparkle/Sparkle/bin (default).
 # RELEASE_NOTES   Markdown file relative to this file; otherwise generic notes.
 #
-# rake release:notary_setup APPLE_ID=you@example.com
+# rake release:setup (create or complete release.json and configure notarization)
 # rake release:bump VERSION=1.1 (requires gh access to check published build numbers)
 # rake release:meta:diff (compare this Rakefile with the upstream main branch)
 # rake release:meta:upgrade (replace this Rakefile with the upstream main branch)
@@ -120,6 +120,19 @@ end
 
 def halt(text)
   abort text.colorize(RED) # red message, then abort the run
+end
+
+def setup_confirm(question)
+  loop do
+    print "#{question} [Y/n]: "
+    $stdout.flush
+    answer = $stdin.gets
+    halt("setup cancelled") unless answer
+    response = answer.strip.downcase
+    return true if ["", "y", "yes"].include?(response)
+    return false if ["n", "no"].include?(response)
+    warn "  enter yes or no"
+  end
 end
 
 # Print a cyan banner announcing the step about to run.
@@ -270,9 +283,9 @@ def generate_appcast_bin
   path
 end
 
-def notary_profile_exists?
+def notary_profile_exists?(profile = setting("NOTARY_PROFILE"))
   # `notarytool history` succeeds only if the named keychain profile resolves.
-  system("xcrun", "notarytool", "history", "--keychain-profile", setting("NOTARY_PROFILE"),
+  system("xcrun", "notarytool", "history", "--keychain-profile", profile,
     out: File::NULL, err: File::NULL)
 end
 
@@ -303,6 +316,109 @@ task release: %w[
 end
 
 namespace :release do
+  desc "Interactively configure release.json and notarization"
+  task :setup do
+    path = File.join(ROOT, "release.json")
+    config = RELEASE_CONFIG.dup
+    manifest = File.file?(MANIFEST) ? File.read(MANIFEST) : ""
+    projects = Dir.glob(File.join(ROOT, "*.xcworkspace")) + Dir.glob(File.join(ROOT, "*.xcodeproj"))
+    inferred_scheme = File.basename(projects.first).sub(/\.(xcworkspace|xcodeproj)\z/, "") if projects.one?
+    project_names = manifest.scan(/\bname:\s*"([^"]+)"/).flatten.uniq
+    inferred_scheme ||= project_names.first if project_names.one?
+    bundle_ids = manifest.scan(/bundleId:\s*"([^"]+)"/).flatten +
+      manifest.scan(/"PRODUCT_BUNDLE_IDENTIFIER"\s*:\s*"([^"]+)"/).flatten
+    bundle_ids.uniq!
+    inferred_account = bundle_ids.first if bundle_ids.one? && !bundle_ids.first.match?(/[\\$]/)
+
+    defaults = {
+      "SCHEME" => inferred_scheme,
+      "SPARKLE_ACCOUNT" => inferred_account
+    }
+    labels = {
+      "SCHEME" => "Xcode scheme to archive",
+      "TEAM_ID" => "Apple Developer team ID",
+      "NOTARY_PROFILE" => "notarytool Keychain profile name",
+      "SPARKLE_ACCOUNT" => "Sparkle signing key account"
+    }
+
+    labels.each do |key, label|
+      next if config.key?(key)
+
+      scheme = config["SCHEME"] || ENV["SCHEME"] || inferred_scheme
+      defaults["NOTARY_PROFILE"] = "#{scheme.downcase.gsub(/[^a-z0-9]+/, "-")}-notary" if scheme.is_a?(String) && !scheme.empty?
+      default = ENV[key].to_s.strip.empty? ? defaults[key] : ENV[key]
+      loop do
+        print "#{key} (#{label})#{default ? " [#{default}]" : ""}: "
+        $stdout.flush
+        answer = $stdin.gets
+        halt("setup cancelled; release.json was not changed") unless answer
+        value = answer.strip
+        value = default if value.empty?
+        if value && !value.empty?
+          config[key] = value
+          break
+        end
+        warn "  #{key} is required"
+      end
+    end
+
+    if config == RELEASE_CONFIG
+      ok "release.json already has all required keys"
+    else
+      Tempfile.create([".release-", ".json"], ROOT) do |file|
+        file.write("#{JSON.pretty_generate(config)}\n")
+        file.flush
+        File.chmod(File.stat(path).mode & 0o7777, file.path) if File.exist?(path)
+        File.rename(file.path, path)
+      end
+      ok "saved #{path}"
+    end
+
+    gitignore = File.join(ROOT, ".gitignore")
+    ignored = File.file?(gitignore) && File.foreach(gitignore).any? { |line| line.strip == "/release.json" }
+    unless ignored
+      if setup_confirm("Add /release.json to .gitignore?")
+        content = File.file?(gitignore) ? File.binread(gitignore) : ""
+        File.open(gitignore, "a") do |file|
+          file.write("\n") unless content.empty? || content.end_with?("\n")
+          file.write("/release.json\n")
+        end
+        ok "added /release.json to .gitignore"
+      else
+        note "Add /release.json to .gitignore before releasing."
+      end
+    end
+
+    profile = ENV.fetch("NOTARY_PROFILE", config["NOTARY_PROFILE"])
+    if notary_profile_exists?(profile)
+      ok "notarytool profile \"#{profile}\" already exists"
+      next
+    end
+
+    if setup_confirm("Create notarytool Keychain profile \"#{profile}\" now?")
+      apple_id = ENV["APPLE_ID"] || config["APPLE_ID"]
+      if apple_id.to_s.strip.empty?
+        loop do
+          print "APPLE_ID (Apple ID email): "
+          $stdout.flush
+          answer = $stdin.gets
+          halt("setup cancelled; release.json was saved") unless answer
+          apple_id = answer.strip
+          break unless apple_id.empty?
+          warn "  APPLE_ID is required"
+        end
+      end
+      puts "Generate an app-specific password at https://appleid.apple.com → Sign-In and Security."
+      # notarytool prompts for the password itself; it never enters release.json.
+      sh! "xcrun", "notarytool", "store-credentials", profile,
+        "--apple-id", apple_id,
+        "--team-id", ENV.fetch("TEAM_ID", config["TEAM_ID"])
+      ok "profile \"#{profile}\" saved; `rake release:run:notarize` can now notarize"
+    else
+      note "Run `rake release:setup` later to create the notarytool profile."
+    end
+  end
+
   namespace :meta do
     desc "show the diff between this Rakefile and the upstream main branch"
     task :diff do
@@ -332,25 +448,6 @@ namespace :release do
       end
       ok "Rakefile replaced with #{UPSTREAM_RAKEFILE}"
     end
-  end
-
-  desc "One-time: save a notarytool keychain profile (prompts for an app-specific password)"
-  task :notary_setup do
-    if notary_profile_exists?
-      ok "notarytool profile \"#{setting("NOTARY_PROFILE")}\" already exists — nothing to do"
-      next
-    end
-
-    apple_id = setting("APPLE_ID")
-    puts "Creating notarytool profile \"#{setting("NOTARY_PROFILE")}\" for #{apple_id} (team #{setting("TEAM_ID")})."
-    puts "Generate an app-specific password at https://appleid.apple.com → Sign-In and Security."
-    # Omitting --password makes notarytool prompt for it, so the secret is typed
-    # straight into store-credentials and never passes through this task or the
-    # shell history.
-    sh! "xcrun", "notarytool", "store-credentials", setting("NOTARY_PROFILE"),
-      "--apple-id", apple_id,
-      "--team-id", setting("TEAM_ID")
-    ok "profile \"#{setting("NOTARY_PROFILE")}\" saved; `rake release:run:notarize` can now notarize"
   end
 
   desc "Bump the marketing version (VERSION=x.y) and increment the build number"
@@ -405,7 +502,7 @@ namespace :release do
              system(keys, "--account", setting("SPARKLE_ACCOUNT"), "-p", out: File::NULL, err: File::NULL))
 
       # notarytool keychain profile for the notarize step.
-      ask.call("notarytool profile \"#{setting("NOTARY_PROFILE")}\" saved (run `rake release:notary_setup`)", notary_profile_exists?)
+      ask.call("notarytool profile \"#{setting("NOTARY_PROFILE")}\" saved (run `rake release:setup`)", notary_profile_exists?)
 
       # gh authenticated for creating the GitHub release.
       ask.call("gh authenticated (run `gh auth login`)", system("gh", "auth", "status", out: File::NULL, err: File::NULL))
@@ -497,7 +594,7 @@ namespace :release do
       step "notarizing and stapling"
       halt("missing #{zip_path} — run `rake release:run:zip` first") unless File.exist?(zip_path)
 
-      halt("No notarytool profile #{setting("NOTARY_PROFILE").inspect}; run `rake release:notary_setup APPLE_ID=...`.") unless notary_profile_exists?
+      halt("No notarytool profile #{setting("NOTARY_PROFILE").inspect}; run `rake release:setup`.") unless notary_profile_exists?
       result = capture!("xcrun", "notarytool", "submit", zip_path,
         "--keychain-profile", setting("NOTARY_PROFILE"), "--wait", "--output-format", "json")
       File.write(File.join(BUILD_DIR, "notarization.json"), result)
